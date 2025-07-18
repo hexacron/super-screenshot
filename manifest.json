@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Super Screenshot",
+  "version": "7.0",
+  "description": "Captures full-page screenshots and extracts page metadata.",
+  "permissions": [
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["results.html", "results.js", "dashboard.html", "dashboard.js", "db.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
