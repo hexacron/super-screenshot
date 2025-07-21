@@ -122,6 +122,88 @@ function extractTikTokData() {
   return data;
 }
 
+// Scraper for INSTAGRAM
+function extractInstagramData() {
+  let data = extractGenericMetadata();
+  try {
+    // Instagram often uses a JSON-LD script for structured data, which is reliable.
+    const scriptTag = document.querySelector('script[type="application/ld+json"]');
+    if (scriptTag) {
+      const jsonData = JSON.parse(scriptTag.textContent);
+      data.instagram_post_id = jsonData.identifier;
+      data.instagram_author = jsonData.author.name;
+      data.instagram_caption = jsonData.caption;
+    } else {
+        // Fallback for post ID from URL if the script isn't found
+        const match = window.location.pathname.match(/\/p\/([a-zA-Z0-9_-]+)/);
+        if (match && match[1]) {
+            data.instagram_post_id = match[1];
+        }
+    }
+  } catch (e) { /* ignore */ }
+  return data;
+}
+
+// Scraper for REDDIT
+function extractRedditData() {
+  let data = extractGenericMetadata();
+  try {
+    // Reddit's modern layout uses custom elements with stable attributes.
+    const postElement = document.querySelector('shreddit-post');
+    if (postElement) {
+        data.reddit_author = postElement.getAttribute('author') || 'Not found';
+        data.reddit_subreddit = postElement.getAttribute('subreddit-name') || 'Not found';
+        data.reddit_post_id = postElement.getAttribute('id') || 'Not found';
+    } else {
+        // Fallback for URL parsing on older layouts or different views
+        const match = window.location.pathname.match(/\/r\/(\w+)\/comments\/(\w+)/);
+        if (match) {
+            data.reddit_subreddit = match[1];
+            data.reddit_post_id = match[2];
+        }
+    }
+  } catch (e) { /* ignore */ }
+  return data;
+}
+
+// Scraper for LINKEDIN
+function extractLinkedInData() {
+  let data = extractGenericMetadata();
+  try {
+    // LinkedIn post URLs contain a unique URN.
+    const urlMatch = window.location.pathname.match(/urn:li:(activity|share|ugcPost):(\d+)/);
+    if (urlMatch && urlMatch[2]) {
+      data.linkedin_post_urn = urlMatch[0];
+      data.linkedin_post_id = urlMatch[2];
+    }
+    
+    // NOTE: Finding author is fragile due to obfuscated classes. This may break.
+    const authorElement = document.querySelector(".feed-shared-actor__name span[aria-hidden='true']");
+    if (authorElement) {
+      data.linkedin_author_name = authorElement.textContent.trim();
+    }
+  } catch (e) { /* ignore */ }
+  return data;
+}
+
+// Scraper for VKONTAKTE (VK)
+function extractVkontakteData() {
+  let data = extractGenericMetadata();
+  try {
+    // VK post URLs are like vk.com/wall-GROUPID_POSTID
+    const urlMatch = window.location.search.match(/w=wall(-?\d+_\d+)/) || window.location.pathname.match(/wall(-?\d+_\d+)/);
+    if (urlMatch && urlMatch[1]) {
+      data.vk_post_id = urlMatch[1];
+      const postElement = document.querySelector(`#post${data.vk_post_id}`);
+      if (postElement) {
+          const authorElement = postElement.querySelector('.post_author .author');
+          if (authorElement) data.vk_author_name = authorElement.textContent.trim();
+      }
+    }
+  } catch (e) { /* ignore */ }
+  return data;
+}
+
 // This is the main ROUTER function that decides which scraper to use.
 function getMetadata() {
   const hostname = window.location.hostname;
@@ -131,6 +213,14 @@ function getMetadata() {
     return extractTwitterData();
   } else if (hostname.includes('tiktok.com')) {
     return extractTikTokData();
+  } else if (hostname.includes('instagram.com')) {
+    return extractInstagramData();
+  } else if (hostname.includes('reddit.com')) {
+    return extractRedditData();
+  } else if (hostname.includes('linkedin.com')) {
+    return extractLinkedInData();
+  } else if (hostname.includes('vk.com')) {
+    return extractVkontakteData();
   } else {
     return extractGenericMetadata();
   }
