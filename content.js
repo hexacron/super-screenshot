@@ -90,15 +90,37 @@ function extractFacebookData() {
 function extractTwitterData() {
   let data = extractGenericMetadata();
   try {
-    const profileLink = document.querySelector("a[data-testid='AppTabBar_Profile_Link']");
-    if (profileLink) {
-      data.twitter_user_id = profileLink.href.split('/').pop();
+    // The most reliable element is the tweet's timestamp, which is a link to the tweet itself.
+    // From this link, we can get both the author's username and the tweet ID.
+    let tweetLink = document.querySelector("article[data-testid='tweet'] a[href*='/status/'] time")?.parentElement;
+
+    // Fallback: If the timestamp link isn't found, find the first link to a status in the article.
+    if (!tweetLink) {
+        tweetLink = document.querySelector("article[data-testid='tweet'] a[href*='/status/']");
     }
-    const tweet = document.querySelector("article[data-testid='tweet'] a[href*='/status/']");
-    if (tweet) {
-        const urlParts = tweet.href.split('/');
-        if (urlParts[urlParts.length - 2] === 'status') {
-            data.twitter_tweet_id = urlParts.pop();
+
+    if (tweetLink && tweetLink.href) {
+      const url = new URL(tweetLink.href);
+      const pathParts = url.pathname.split('/');
+      // Path is like: /<username>/status/<tweet_id>
+      if (pathParts.length > 3 && pathParts[2] === 'status') {
+        data.twitter_screen_name = pathParts[1];
+        data.twitter_tweet_id = pathParts[3];
+      }
+    }
+
+    // Find the numerical user ID from the page's embedded JSON data.
+    const nextDataScript = document.getElementById('__NEXT_DATA__');
+    if (nextDataScript && data.twitter_screen_name) {
+        const jsonData = JSON.parse(nextDataScript.textContent);
+        const users = jsonData?.props?.pageProps?.initialState?.entities?.users?.entities;
+        if (users) {
+            const authorObject = Object.values(users).find(
+                user => user.screen_name.toLowerCase() === data.twitter_screen_name.toLowerCase()
+            );
+            if (authorObject) {
+                data.twitter_user_id = authorObject.id_str; // The numerical ID
+            }
         }
     }
   } catch (e) { /* ignore */ }
