@@ -1,13 +1,20 @@
 // This check makes the script safe to inject multiple times
 if (typeof hiddenElements === 'undefined') {
   var hiddenElements = [];
+  var scrollTarget = window;
+  var scrollElement = document.documentElement;
+  var activeModal = null;
 }
 
-// All of these helper functions are correct and do not need changes.
+// This function is now more careful when a modal is active.
 function hideFixedElements() {
   hiddenElements = [];
   const elements = document.querySelectorAll('*');
   elements.forEach(el => {
+    // If we are in a modal, do not hide the modal itself or its direct children.
+    if (activeModal && activeModal.contains(el)) {
+        return;
+    }
     const style = window.getComputedStyle(el);
     if (style.position === 'fixed' || style.position === 'sticky') {
       el.style.setProperty('display', 'none', 'important');
@@ -20,6 +27,50 @@ function showFixedElements() {
   hiddenElements.forEach(el => {
     el.style.display = '';
   });
+}
+
+// This function has been re-engineered for much higher accuracy in detecting modal scroll areas.
+function determineScrollContext() {
+    // Reset to defaults for a new capture session
+    activeModal = null;
+    scrollElement = document.scrollingElement || document.documentElement; // Use modern standard
+    scrollTarget = window;
+
+    // A reliable pattern for detecting an active modal is that the main body's scroll is locked.
+    const bodyStyle = window.getComputedStyle(document.body);
+    const isBodyLocked = bodyStyle.overflow === 'hidden' || bodyStyle.overflowY === 'hidden';
+
+    if (isBodyLocked) {
+        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
+        const visibleDialogs = dialogs.filter(d => window.getComputedStyle(d).display !== 'none');
+
+        if (visibleDialogs.length > 0) {
+            let bestScroller = null;
+            let maxScrollHeight = 0;
+
+            visibleDialogs.forEach(dialog => {
+                const candidates = Array.from(dialog.querySelectorAll('*'));
+                candidates.unshift(dialog); // Check the dialog itself
+
+                for (const el of candidates) {
+                    const style = window.getComputedStyle(el);
+                    // CRITICAL: The element must be explicitly scrollable AND have overflowing content.
+                    if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
+                        if (el.scrollHeight > maxScrollHeight) {
+                            bestScroller = el;
+                            maxScrollHeight = el.scrollHeight;
+                        }
+                    }
+                }
+            });
+
+            if (bestScroller) {
+                activeModal = bestScroller.closest('div[role="dialog"]'); // The container to preserve
+                scrollElement = bestScroller; // The element for dimensions
+                scrollTarget = bestScroller; // The element to scroll
+            }
+        }
+    }
 }
 
 function showStopButton() {
@@ -44,9 +95,8 @@ function hideStopButton() {
     }
 }
 
-// --- METADATA EXTRACTION LOGIC ---
+// --- METADATA EXTRACTION LOGIC (with improved error handling) ---
 
-// This is the GENERIC function that runs on any standard webpage.
 function extractGenericMetadata() {
   const getMeta = (selector) => document.querySelector(selector)?.content || 'Not found';
   return {
@@ -60,74 +110,58 @@ function extractGenericMetadata() {
   };
 }
 
-// Scraper for FACEBOOK (Now with User ID extraction)
 function extractFacebookData() {
   let data = extractGenericMetadata();
   try {
-    // Attempt to find Post ID
     const permalink = document.querySelector("a[href*='/posts/'], a[href*='/videos/'], a[href*='?story_fbid=']");
     if (permalink) {
       const url = new URL(permalink.href);
       const pathParts = url.pathname.split('/');
       data.facebook_post_id = pathParts.find(part => /^\d{15,}/.test(part)) || 'Not found';
     }
-
-    // --- NEW: Attempt to find User ID ---
-    // User IDs are often found in the HTML body as "userID":"<some_long_number>"
     const bodyHtml = document.body.innerHTML;
     const userIdMatch = bodyHtml.match(/"userID":"(\d+)"/);
-    if (userIdMatch && userIdMatch[1]) {
-        data.facebook_user_id = userIdMatch[1];
-    } else {
-        data.facebook_user_id = 'Not found';
-    }
-    
-  } catch (e) { /* ignore errors */ }
+    data.facebook_user_id = (userIdMatch && userIdMatch[1]) ? userIdMatch[1] : 'Not found';
+  } catch (e) { /* ignore */ }
   return data;
 }
 
-// Scraper for TWITTER / X
 function extractTwitterData() {
   let data = extractGenericMetadata();
+  const pathParts = window.location.pathname.split('/').filter(p => p);
   try {
-    // The most reliable element is the tweet's timestamp, which is a link to the tweet itself.
-    // From this link, we can get both the author's username and the tweet ID.
-    let tweetLink = document.querySelector("article[data-testid='tweet'] a[href*='/status/'] time")?.parentElement;
-
-    // Fallback: If the timestamp link isn't found, find the first link to a status in the article.
-    if (!tweetLink) {
-        tweetLink = document.querySelector("article[data-testid='tweet'] a[href*='/status/']");
-    }
-
-    if (tweetLink && tweetLink.href) {
-      const url = new URL(tweetLink.href);
-      const pathParts = url.pathname.split('/');
-      // Path is like: /<username>/status/<tweet_id>
-      if (pathParts.length > 3 && pathParts[2] === 'status') {
-        data.twitter_screen_name = pathParts[1];
-        data.twitter_tweet_id = pathParts[3];
-      }
-    }
-
-    // Find the numerical user ID from the page's embedded JSON data.
     const nextDataScript = document.getElementById('__NEXT_DATA__');
-    if (nextDataScript && data.twitter_screen_name) {
-        const jsonData = JSON.parse(nextDataScript.textContent);
+    if (!nextDataScript) {
+        if (pathParts.length >= 3 && pathParts[1] === 'status') {
+            data.twitter_screen_name = pathParts[0];
+            data.twitter_tweet_id = pathParts[2];
+        } else if (pathParts.length >= 1) {
+            data.twitter_screen_name = pathParts[0];
+        }
+        return data;
+    }
+    const jsonData = JSON.parse(nextDataScript.textContent);
+    const isTweetPage = pathParts.length >= 3 && pathParts[1] === 'status';
+    if (isTweetPage) {
+        data.twitter_tweet_id = pathParts[2];
+        const screenNameFromUrl = pathParts[0];
+        data.twitter_screen_name = screenNameFromUrl;
         const users = jsonData?.props?.pageProps?.initialState?.entities?.users?.entities;
         if (users) {
-            const authorObject = Object.values(users).find(
-                user => user.screen_name.toLowerCase() === data.twitter_screen_name.toLowerCase()
-            );
-            if (authorObject) {
-                data.twitter_user_id = authorObject.id_str; // The numerical ID
-            }
+            const authorObject = Object.values(users).find(user => user.screen_name.toLowerCase() === screenNameFromUrl.toLowerCase());
+            if (authorObject) data.twitter_user_id = authorObject.id_str;
+        }
+    } else {
+        const userData = jsonData?.props?.pageProps?.userData?.user_results?.result;
+        if (userData) {
+            data.twitter_screen_name = userData.legacy?.screen_name;
+            data.twitter_user_id = userData.rest_id;
         }
     }
   } catch (e) { /* ignore */ }
   return data;
 }
 
-// Scraper for TIKTOK
 function extractTikTokData() {
   let data = extractGenericMetadata();
   try {
@@ -144,11 +178,9 @@ function extractTikTokData() {
   return data;
 }
 
-// Scraper for INSTAGRAM
 function extractInstagramData() {
   let data = extractGenericMetadata();
   try {
-    // Instagram often uses a JSON-LD script for structured data, which is reliable.
     const scriptTag = document.querySelector('script[type="application/ld+json"]');
     if (scriptTag) {
       const jsonData = JSON.parse(scriptTag.textContent);
@@ -156,28 +188,22 @@ function extractInstagramData() {
       data.instagram_author = jsonData.author.name;
       data.instagram_caption = jsonData.caption;
     } else {
-        // Fallback for post ID from URL if the script isn't found
         const match = window.location.pathname.match(/\/p\/([a-zA-Z0-9_-]+)/);
-        if (match && match[1]) {
-            data.instagram_post_id = match[1];
-        }
+        if (match && match[1]) data.instagram_post_id = match[1];
     }
   } catch (e) { /* ignore */ }
   return data;
 }
 
-// Scraper for REDDIT
 function extractRedditData() {
   let data = extractGenericMetadata();
   try {
-    // Reddit's modern layout uses custom elements with stable attributes.
     const postElement = document.querySelector('shreddit-post');
     if (postElement) {
         data.reddit_author = postElement.getAttribute('author') || 'Not found';
         data.reddit_subreddit = postElement.getAttribute('subreddit-name') || 'Not found';
         data.reddit_post_id = postElement.getAttribute('id') || 'Not found';
     } else {
-        // Fallback for URL parsing on older layouts or different views
         const match = window.location.pathname.match(/\/r\/(\w+)\/comments\/(\w+)/);
         if (match) {
             data.reddit_subreddit = match[1];
@@ -188,31 +214,23 @@ function extractRedditData() {
   return data;
 }
 
-// Scraper for LINKEDIN
 function extractLinkedInData() {
   let data = extractGenericMetadata();
   try {
-    // LinkedIn post URLs contain a unique URN.
     const urlMatch = window.location.pathname.match(/urn:li:(activity|share|ugcPost):(\d+)/);
     if (urlMatch && urlMatch[2]) {
       data.linkedin_post_urn = urlMatch[0];
       data.linkedin_post_id = urlMatch[2];
     }
-    
-    // NOTE: Finding author is fragile due to obfuscated classes. This may break.
     const authorElement = document.querySelector(".feed-shared-actor__name span[aria-hidden='true']");
-    if (authorElement) {
-      data.linkedin_author_name = authorElement.textContent.trim();
-    }
+    if (authorElement) data.linkedin_author_name = authorElement.textContent.trim();
   } catch (e) { /* ignore */ }
   return data;
 }
 
-// Scraper for VKONTAKTE (VK)
 function extractVkontakteData() {
   let data = extractGenericMetadata();
   try {
-    // VK post URLs are like vk.com/wall-GROUPID_POSTID
     const urlMatch = window.location.search.match(/w=wall(-?\d+_\d+)/) || window.location.pathname.match(/wall(-?\d+_\d+)/);
     if (urlMatch && urlMatch[1]) {
       data.vk_post_id = urlMatch[1];
@@ -226,41 +244,35 @@ function extractVkontakteData() {
   return data;
 }
 
-// This is the main ROUTER function that decides which scraper to use.
 function getMetadata() {
   const hostname = window.location.hostname;
-  if (hostname.includes('facebook.com')) {
-    return extractFacebookData();
-  } else if (hostname.includes('twitter.com') || hostname.includes('x.com')) {
-    return extractTwitterData();
-  } else if (hostname.includes('tiktok.com')) {
-    return extractTikTokData();
-  } else if (hostname.includes('instagram.com')) {
-    return extractInstagramData();
-  } else if (hostname.includes('reddit.com')) {
-    return extractRedditData();
-  } else if (hostname.includes('linkedin.com')) {
-    return extractLinkedInData();
-  } else if (hostname.includes('vk.com')) {
-    return extractVkontakteData();
-  } else {
-    return extractGenericMetadata();
-  }
+  if (hostname.includes('facebook.com')) return extractFacebookData();
+  if (hostname.includes('twitter.com') || hostname.includes('x.com')) return extractTwitterData();
+  if (hostname.includes('tiktok.com')) return extractTikTokData();
+  if (hostname.includes('instagram.com')) return extractInstagramData();
+  if (hostname.includes('reddit.com')) return extractRedditData();
+  if (hostname.includes('linkedin.com')) return extractLinkedInData();
+  if (hostname.includes('vk.com')) return extractVkontakteData();
+  return extractGenericMetadata();
 }
 
-// The main message listener
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     switch (request.message) {
         case 'get_scroll_data':
-            const pageHeight = document.body.scrollHeight;
-            const currentScrollY = window.scrollY;
-            const viewportHeight = window.innerHeight;
-            window.scrollBy(0, viewportHeight);
+            const pageHeight = scrollElement.scrollHeight;
+            const currentScrollY = scrollElement.scrollTop;
+            const viewportHeight = scrollElement.clientHeight;
+            // Use the appropriate scroll method based on the target
+            if (scrollTarget === window) {
+                scrollTarget.scrollBy(0, viewportHeight);
+            } else {
+                scrollTarget.scrollTop += viewportHeight;
+            }
             sendResponse({
               scrollHeight: pageHeight,
               currentScrollY: currentScrollY,
               viewportHeight: viewportHeight,
-              isAtBottom: (currentScrollY + viewportHeight) >= pageHeight
+              isAtBottom: (currentScrollY + viewportHeight + 2) >= pageHeight
             });
             break;
         case 'get_metadata':
@@ -268,7 +280,20 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             break;
         case 'hide_elements': hideFixedElements(); sendResponse({}); break;
         case 'show_elements': showFixedElements(); sendResponse({}); break;
-        case 'show_stop_button': showStopButton(); sendResponse({}); break;
+        case 'show_stop_button':
+            // This is now the single entry point that sets up the context for the capture.
+            determineScrollContext();
+            showStopButton();
+            sendResponse({});
+            break;
+        case 'reset_scroll':
+            if (scrollTarget === window) {
+                scrollTarget.scrollTo(0, 0);
+            } else if (scrollTarget && scrollTarget.scrollTop !== undefined) {
+                scrollTarget.scrollTop = 0;
+            }
+            sendResponse({});
+            break;
         case 'hide_stop_button': hideStopButton(); sendResponse({}); break;
     }
     return true;

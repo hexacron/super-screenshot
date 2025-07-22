@@ -80,7 +80,15 @@ function startCapture(tab, metadata) {
             captureInProgress = false;
             return;
         }
-        captureLoop(tab, metadata);
+        // NEW: Add a step to reset the scroll position before the loop starts.
+        // This ensures modal captures start from the very top of the content.
+        chrome.tabs.sendMessage(tab.id, { message: 'reset_scroll' }, () => {
+            if (chrome.runtime.lastError) {
+                // This is not critical, it just means no special scroll context was found.
+            }
+            // A short delay is needed for the scroll to take effect before the first capture.
+            setTimeout(() => captureLoop(tab, metadata), 150);
+        });
     });
 }
 
@@ -120,7 +128,7 @@ function captureLoop(tab, metadata) {
                             captureInProgress = false;
                             chrome.tabs.sendMessage(tab.id, { message: 'hide_stop_button' }, () => chrome.runtime.lastError && 0);
                             setupOffscreenCanvas(metadata);
-                        } else {
+                        } else {                            
                             setTimeout(() => captureLoop(tab, metadata), 750);
                         }
                     });
