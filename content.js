@@ -11,7 +11,7 @@ function hideFixedElements() {
   hiddenElements = [];
   const elements = document.querySelectorAll('*');
   elements.forEach(el => {
-    // If we are in a modal, do not hide the modal itself or its direct children.
+    // If we are in a modal, do not hide the modal itself or its children.
     if (activeModal && activeModal.contains(el)) {
         return;
     }
@@ -29,49 +29,74 @@ function showFixedElements() {
   });
 }
 
-// This function has been re-engineered for much higher accuracy in detecting modal scroll areas.
-function determineScrollContext() {
+// This function has been completely re-engineered with a new "interactive" strategy.
+async function determineScrollContext() {
     // Reset to defaults for a new capture session
     activeModal = null;
-    scrollElement = document.scrollingElement || document.documentElement; // Use modern standard
+    scrollElement = document.scrollingElement || document.documentElement;
     scrollTarget = window;
 
-    // A reliable pattern for detecting an active modal is that the main body's scroll is locked.
     const bodyStyle = window.getComputedStyle(document.body);
     const isBodyLocked = bodyStyle.overflow === 'hidden' || bodyStyle.overflowY === 'hidden';
 
-    if (isBodyLocked) {
-        const dialogs = Array.from(document.querySelectorAll('div[role="dialog"]'));
-        const visibleDialogs = dialogs.filter(d => window.getComputedStyle(d).display !== 'none');
+    if (!isBodyLocked) {
+        return; // Not in a modal context, we're done.
+    }
 
-        if (visibleDialogs.length > 0) {
-            let bestScroller = null;
-            let maxScrollHeight = 0;
+    const modal = Array.from(document.querySelectorAll('div[role="dialog"]')).find(el => el.offsetParent !== null);
+    if (!modal) {
+        return; // No visible modal found
+    }
 
-            visibleDialogs.forEach(dialog => {
-                const candidates = Array.from(dialog.querySelectorAll('*'));
-                candidates.unshift(dialog); // Check the dialog itself
+    // --- NEW "POKE AND OBSERVE" STRATEGY ---
+    // Previous methods failed because they guessed based on static properties (size, scrollHeight).
+    // This new approach is interactive: we simulate a user action (scrolling) and observe
+    // which element actually moves. This is fundamentally more reliable.
 
-                for (const el of candidates) {
-                    const style = window.getComputedStyle(el);
-                    // CRITICAL: The element must be explicitly scrollable AND have overflowing content.
-                    if ((style.overflowY === 'auto' || style.overflowY === 'scroll') && el.scrollHeight > el.clientHeight) {
-                        if (el.scrollHeight > maxScrollHeight) {
-                            bestScroller = el;
-                            maxScrollHeight = el.scrollHeight;
-                        }
-                    }
-                }
-            });
+    const candidates = Array.from(modal.querySelectorAll('*'));
+    candidates.unshift(modal);
 
-            if (bestScroller) {
-                activeModal = bestScroller.closest('div[role="dialog"]'); // The container to preserve
-                scrollElement = bestScroller; // The element for dimensions
-                scrollTarget = bestScroller; // The element to scroll
-            }
+    // Store initial scroll positions of all elements in the modal
+    const initialScrollTops = new Map(candidates.map(el => [el, el.scrollTop]));
+
+    // "Poke" the modal by dispatching a wheel event to simulate a user scrolling
+    modal.dispatchEvent(new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 100 }));
+
+    // Wait a moment for the browser to process the event and render the scroll
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    let foundScroller = null;
+    // Check which element's scroll position has changed
+    for (const el of candidates) {
+        if (el.scrollTop !== initialScrollTops.get(el)) {
+            foundScroller = el;
+            break; // Found the one that scrolled
+        }
+    }
+
+    if (foundScroller) {
+        // We found the element that scrolled! Scroll it back to its original position.
+        // The 'reset_scroll' command will handle the final reset to the very top.
+        foundScroller.scrollTop = initialScrollTops.get(foundScroller);
+
+        activeModal = modal;
+        scrollElement = foundScroller;
+        scrollTarget = foundScroller;
+    } else {
+        // FALLBACK: If nothing scrolled, it's likely a non-scrolling modal.
+        // Use the "most content" heuristic as a safe bet for getting dimensions right.
+        const fallbackScroller = candidates
+            .filter(el => (window.getComputedStyle(el).overflowY === 'auto' || window.getComputedStyle(el).overflowY === 'scroll') && el.clientHeight > 0)
+            .reduce((best, current) => (!best || current.scrollHeight > best.scrollHeight) ? current : best, null);
+
+        if (fallbackScroller) {
+            activeModal = modal;
+            scrollElement = fallbackScroller;
+            scrollTarget = fallbackScroller;
         }
     }
 }
+
 
 function showStopButton() {
     const stopButton = document.createElement('button');
@@ -262,16 +287,15 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             const pageHeight = scrollElement.scrollHeight;
             const currentScrollY = scrollElement.scrollTop;
             const viewportHeight = scrollElement.clientHeight;
-            // Use the appropriate scroll method based on the target
-            if (scrollTarget === window) {
-                scrollTarget.scrollBy(0, viewportHeight);
-            } else {
-                scrollTarget.scrollTop += viewportHeight;
-            }
+            // Use a more "forceful" and consistent scroll method.
+            // The scrollTo() method with 'instant' behavior can be more reliable on
+            // complex sites that might interfere with direct scrollTop manipulation.
+            scrollTarget.scrollTo({ top: currentScrollY + viewportHeight, behavior: 'instant' });
             sendResponse({
               scrollHeight: pageHeight,
               currentScrollY: currentScrollY,
               viewportHeight: viewportHeight,
+              // Add a small buffer to account for fractional pixels
               isAtBottom: (currentScrollY + viewportHeight + 2) >= pageHeight
             });
             break;
@@ -281,17 +305,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         case 'hide_elements': hideFixedElements(); sendResponse({}); break;
         case 'show_elements': showFixedElements(); sendResponse({}); break;
         case 'show_stop_button':
-            // This is now the single entry point that sets up the context for the capture.
-            determineScrollContext();
-            showStopButton();
-            sendResponse({});
+            // This is now async because determineScrollContext is interactive.
+            determineScrollContext().then(() => {
+                showStopButton();
+                sendResponse({});
+            });
+            return true; // IMPORTANT: Indicates an async response.
             break;
         case 'reset_scroll':
-            if (scrollTarget === window) {
-                scrollTarget.scrollTo(0, 0);
-            } else if (scrollTarget && scrollTarget.scrollTop !== undefined) {
-                scrollTarget.scrollTop = 0;
-            }
+            // Use the forceful method for resetting as well.
+            scrollTarget.scrollTo({ top: 0, behavior: 'instant' });
             sendResponse({});
             break;
         case 'hide_stop_button': hideStopButton(); sendResponse({}); break;
